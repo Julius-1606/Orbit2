@@ -17,7 +17,7 @@ from github import Github # <--- NEW: Importing the cloud connector
 
 # --- 🔐 SECRETS MANAGEMENT ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-KEYS_STRING = os.environ.get("GEMINI_KEYS")
+KEYS_STRING = os.environ.get("GEMINI_API_KEYS")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") # <--- NEW
 GITHUB_REPO = os.environ.get("GITHUB_REPO")   # <--- NEW
 
@@ -269,3 +269,4 @@ async def send_chaos():
 
 if __name__ == "__main__":
     asyncio.run(send_chaos())
+
