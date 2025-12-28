@@ -5,6 +5,7 @@ import asyncio
 import sys
 import time
 import warnings
+import toml
 
 # --- 🔇 SUPPRESS WARNINGS ---
 os.environ["GRPC_VERBOSITY"] = "ERROR"
@@ -13,46 +14,58 @@ warnings.filterwarnings("ignore")
 
 import google.generativeai as genai
 from telegram import Bot
-from github import Github # <--- NEW: Importing the cloud connector
+from github import Github  # Requires: pip install PyGithub
 
 # --- 🔐 SECRETS MANAGEMENT ---
+# 1. Load Telegram Token
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-KEYS_STRING = os.environ.get("GEMINI_API_KEYS")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") # <--- NEW
-GITHUB_REPO = os.environ.get("GITHUB_REPO")   # <--- NEW
 
-# Check if we need to load from secrets.toml (Local Dev Mode)
-if not TELEGRAM_TOKEN or not KEYS_STRING or not GITHUB_TOKEN:
+# 2. Load Gemini Keys (The Arsenal)
+# We accept "GEMINI_KEYS" from env/toml and convert to "GEMINI_API_KEYS" list
+KEYS_STRING = os.environ.get("GEMINI_KEYS")
+
+# 3. Load GitHub Token (The Cloud Pass)
+# PRIORITIZING "GITHUB_KEYS" as per your setup, falling back to "GITHUB_TOKEN"
+GITHUB_PAT = os.environ.get("GITHUB_KEYS") or os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
+
+# --- LOCAL FALLBACK (If not in Cloud Env) ---
+if not TELEGRAM_TOKEN or not KEYS_STRING or not GITHUB_PAT:
     try:
-        import toml
         script_dir = os.path.dirname(os.path.abspath(__file__))
         secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
-        with open(secrets_path, "r") as f:
-            local_secrets = toml.load(f)
-            TELEGRAM_TOKEN = TELEGRAM_TOKEN or local_secrets.get("TELEGRAM_TOKEN")
-            
-            # Load Gemini Keys
-            raw_keys = local_secrets.get("GEMINI_KEYS")
-            if isinstance(raw_keys, list):
-                GEMINI_API_KEYS = raw_keys
-            elif isinstance(raw_keys, str):
-                GEMINI_API_KEYS = raw_keys.split(",")
-            else:
-                GEMINI_API_KEYS = []
-            
-            # Load GitHub Secrets
-            GITHUB_TOKEN = GITHUB_TOKEN or local_secrets.get("GITHUB_TOKEN")
-            GITHUB_REPO = GITHUB_REPO or local_secrets.get("GITHUB_REPO")
+        
+        if os.path.exists(secrets_path):
+            print(f"📂 Loading secrets from: {secrets_path}")
+            with open(secrets_path, "r") as f:
+                local_secrets = toml.load(f)
+                
+                # Fill in blanks if missing from ENV
+                TELEGRAM_TOKEN = TELEGRAM_TOKEN or local_secrets.get("TELEGRAM_TOKEN")
+                
+                # Handle Gemini Keys (List or String)
+                raw_keys = local_secrets.get("GEMINI_KEYS")
+                if isinstance(raw_keys, list):
+                    GEMINI_API_KEYS = raw_keys
+                elif isinstance(raw_keys, str):
+                    GEMINI_API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
+                    KEYS_STRING = "LOADED" # Mark as loaded
+                
+                # Handle GitHub
+                GITHUB_PAT = GITHUB_PAT or local_secrets.get("GITHUB_KEYS") or local_secrets.get("GITHUB_TOKEN")
+                GITHUB_REPO = GITHUB_REPO or local_secrets.get("GITHUB_REPO")
 
-    except Exception:
-        pass
-else:
-    GEMINI_API_KEYS = KEYS_STRING.split(",") if KEYS_STRING else []
+    except Exception as e:
+        print(f"⚠️ Local secrets error: {e}")
 
-GEMINI_API_KEYS = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
+# --- FINAL PROCESSING ---
+# Ensure GEMINI_API_KEYS is a list, even if loaded from Env String
+if 'GEMINI_API_KEYS' not in globals():
+    GEMINI_API_KEYS = [k.strip() for k in KEYS_STRING.split(",")] if KEYS_STRING else []
 
+# Validate Critical Secrets
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
-    print("❌ FATAL ERROR: Secrets not found.")
+    print("❌ FATAL ERROR: Telegram Token or Gemini Keys missing.")
     sys.exit(1)
 
 CHAT_ID = "6882899041" 
@@ -65,6 +78,7 @@ def configure_genai():
     key = GEMINI_API_KEYS[CURRENT_KEY_INDEX]
     try:
         genai.configure(api_key=key)
+        # print(f"🔑 Active Key Index: {CURRENT_KEY_INDEX}") # Debug only
     except Exception as e:
         print(f"⚠️ Config Error on Key #{CURRENT_KEY_INDEX+1}: {e}")
 
@@ -144,13 +158,13 @@ async def send_safe_message(bot, chat_id, text):
         print(f"⚠️ HTML Parse Error: {e}. Sending raw text.")
         await bot.send_message(chat_id=chat_id, text=text)
 
-# --- ☁️ CONFIG LOADER (UPDATED) ---
+# --- ☁️ CONFIG LOADER (CLOUD SYNCED) ---
 def load_config():
     # 1. Try fetching from GitHub (The Cloud Truth)
-    if GITHUB_TOKEN and GITHUB_REPO:
+    if GITHUB_PAT and GITHUB_REPO:
         try:
             print("☁️ Fetching config from GitHub...")
-            g = Github(GITHUB_TOKEN)
+            g = Github(GITHUB_PAT)
             repo = g.get_repo(GITHUB_REPO)
             contents = repo.get_contents("config.json")
             decoded = contents.decoded_content.decode()
@@ -220,8 +234,7 @@ async def send_chaos():
         
         # BATCH REQUEST: Ask for ALL questions in ONE prompt
         prompt = f"""
-        Generate {num_questions} multiple-choice questions about {target_unit} for a 4th Year Student.
-        Difficulty: {config['difficulty']}.
+        Generate {num_q} multiple-choice questions about {unit} for a 4th Year Student.
         
         Strict JSON format: Return a LIST of objects.
         [
@@ -230,7 +243,7 @@ async def send_chaos():
         ]
         
         Limits: Question < 250 chars, Options < 100 chars.
-        """.replace("{num_questions}", str(num_q)).replace("{target_unit}", unit) # Safe replace
+        """.replace("{num_questions}", str(num_q)) # Safe replace
 
         response = generate_content_safe(prompt)
         
@@ -269,4 +282,3 @@ async def send_chaos():
 
 if __name__ == "__main__":
     asyncio.run(send_chaos())
-
