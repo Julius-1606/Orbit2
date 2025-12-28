@@ -9,8 +9,9 @@ import json
 import time
 import random
 import google.generativeai as genai
+from github import Github
 
-# --- 🔐 SECURE KEYCHAIN ---
+# --- 🔐 SECURE KEYCHAIN (GEMINI) ---
 GEMINI_API_KEYS = []
 try:
     raw_keys = st.secrets.get("GEMINI_KEYS")
@@ -23,6 +24,7 @@ except Exception:
     pass
 
 if not GEMINI_API_KEYS:
+    # Local Fallback
     try:
         keys_str = os.environ.get("GEMINI_KEYS")
         if keys_str:
@@ -55,7 +57,7 @@ def rotate_key():
 
 configure_genai()
 
-# 📡 SONAR (Copied from Orbit.py)
+# 📡 SONAR 
 def get_valid_model():
     try:
         models = list(genai.list_models())
@@ -102,22 +104,74 @@ def ask_orbit(prompt):
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Orbit Command Center", page_icon="🛰️", layout="wide")
 
-def get_config_path():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, 'config.json')
+# --- ☁️ GITHUB INTEGRATION ---
+def get_github_session():
+    token = st.secrets.get("GITHUB_TOKEN")
+    repo_name = st.secrets.get("GITHUB_REPO") # Format: "username/repo"
+    
+    if not token or not repo_name:
+        st.sidebar.error("❌ GitHub Secrets Missing!")
+        return None, None
+    
+    try:
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        return g, repo
+    except Exception as e:
+        st.sidebar.error(f"❌ GitHub Connection Failed: {e}")
+        return None, None
 
 def load_config():
+    # Attempt GitHub Fetch
+    g, repo = get_github_session()
+    if repo:
+        try:
+            contents = repo.get_contents("config.json")
+            decoded = contents.decoded_content.decode()
+            return json.loads(decoded)
+        except Exception as e:
+            st.warning(f"⚠️ Cloud load failed ({e}). Checking local...")
+    
+    # Fallback to local
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'config.json')
     try:
-        with open(get_config_path(), 'r') as f: return json.load(f)
+        with open(config_path, 'r') as f: return json.load(f)
     except FileNotFoundError: return None
 
-def save_config(config):
-    with open(get_config_path(), 'w') as f: json.dump(config, f, indent=4)
-    st.toast("Settings Saved! 💾", icon="✅")
+def save_config(new_config):
+    g, repo = get_github_session()
+    if repo:
+        try:
+            # We need to get the file again to get the current SHA (optimistic locking)
+            contents = repo.get_contents("config.json")
+            repo.update_file(
+                path=contents.path,
+                message="🤖 Orbit Dashboard Update",
+                content=json.dumps(new_config, indent=4),
+                sha=contents.sha
+            )
+            st.toast("Sync Complete: GitHub Updated ☁️", icon="✅")
+            return True
+        except Exception as e:
+            st.error(f"❌ Cloud Save Failed: {e}")
+            return False
+    else:
+        # Fallback Local Save
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, 'config.json')
+        with open(config_path, 'w') as f: json.dump(new_config, f, indent=4)
+        st.toast("Local Save Only (No GitHub Link)", icon="💾")
+        return True
 
 st.title("🛰️ Orbit: Your Personal Academic Weapon")
-st.markdown("*Doc in the making*")
-config = load_config()
+st.markdown("*Cloud-Linked Command Center*")
+
+# Load config once or on refresh
+if 'config' not in st.session_state:
+    st.session_state.config = load_config()
+
+config = st.session_state.config
 
 if config:
     with st.sidebar:
@@ -130,7 +184,8 @@ if config:
         new_diff = st.selectbox("Difficulty Level", diffs, index=idx)
         if new_diff != curr_diff:
             config['difficulty'] = new_diff
-            save_config(config)
+            if save_config(config):
+                st.session_state.config = config # Update session state
         st.divider()
         st.header("🎯 Active Loadout")
         for unit in config['current_units']: st.caption(f"• {unit}")
@@ -254,20 +309,27 @@ if config:
                     s = "General"
                 adds = st.multiselect(f"Add from {y}-{s}", avail)
                 if st.button("➕ Add"):
+                    changed = False
                     for u in adds:
-                        if u not in config['current_units']: config['current_units'].append(u)
-                    save_config(config)
-                    st.rerun()
+                        if u not in config['current_units']: 
+                            config['current_units'].append(u)
+                            changed = True
+                    if changed:
+                        if save_config(config):
+                            st.session_state.config = config
+                            st.rerun()
         with col2:
             for unit in config['current_units']:
                 if st.checkbox(f"Drop {unit}", key=unit):
                     config['current_units'].remove(unit)
-                    save_config(config)
-                    st.rerun()
+                    if save_config(config):
+                        st.session_state.config = config
+                        st.rerun()
 
     with tab4:
         curr = st.text_area("Interests", ", ".join(config['interests']))
         if st.button("Update Interests"):
             config['interests'] = [x.strip() for x in curr.split(",")]
-            save_config(config)
-            st.success("Updated!")
+            if save_config(config):
+                st.session_state.config = config
+                st.success("Updated!")
