@@ -9,7 +9,10 @@ import json
 import time
 import random
 import google.generativeai as genai
-from github import Github
+from github import Github # pip install PyGithub
+
+# --- ⚙️ SETTINGS ---
+MAX_HISTORY = 100  # The Sliding Window Limit
 
 # --- 🔐 SECURE KEYCHAIN (GEMINI) ---
 GEMINI_API_KEYS = []
@@ -106,8 +109,8 @@ st.set_page_config(page_title="Orbit Command Center", page_icon="🛰️", layou
 
 # --- ☁️ GITHUB INTEGRATION ---
 def get_github_session():
-    token = st.secrets.get("GITHUB_TOKEN")
-    repo_name = st.secrets.get("GITHUB_REPO") # Format: "username/repo"
+    token = st.secrets.get("GITHUB_TOKEN") or st.secrets.get("GITHUB_KEYS")
+    repo_name = st.secrets.get("GITHUB_REPO")
     
     if not token or not repo_name:
         st.sidebar.error("❌ GitHub Secrets Missing!")
@@ -143,15 +146,15 @@ def save_config(new_config):
     g, repo = get_github_session()
     if repo:
         try:
-            # We need to get the file again to get the current SHA (optimistic locking)
+            # Optimistic Locking: Get SHA first
             contents = repo.get_contents("config.json")
             repo.update_file(
                 path=contents.path,
-                message="🤖 Orbit Dashboard Update",
+                message="🤖 Orbit Memory Update",
                 content=json.dumps(new_config, indent=4),
                 sha=contents.sha
             )
-            st.toast("Sync Complete: GitHub Updated ☁️", icon="✅")
+            # st.toast("Memory Synced ☁️", icon="✅") # Uncomment if you want constant notifications
             return True
         except Exception as e:
             st.error(f"❌ Cloud Save Failed: {e}")
@@ -161,11 +164,10 @@ def save_config(new_config):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(script_dir, 'config.json')
         with open(config_path, 'w') as f: json.dump(new_config, f, indent=4)
-        st.toast("Local Save Only (No GitHub Link)", icon="💾")
+        st.toast("Local Save Only", icon="💾")
         return True
 
 st.title("🛰️ Orbit: Your Personal Academic Weapon")
-st.markdown("*Cloud-Linked Command Center*")
 
 # Load config once or on refresh
 if 'config' not in st.session_state:
@@ -185,28 +187,57 @@ if config:
         if new_diff != curr_diff:
             config['difficulty'] = new_diff
             if save_config(config):
-                st.session_state.config = config # Update session state
+                st.session_state.config = config
         st.divider()
         st.header("🎯 Active Loadout")
         for unit in config['current_units']: st.caption(f"• {unit}")
 
     tab1, tab2, tab3, tab4 = st.tabs(["💬 Orbit Chat", "📝 Chaos Quiz", "📚 Curriculum Manager", "🎲 Chaos Settings"])
 
+    # --- TAB 1: CHAT WITH MEMORY ---
     with tab1:
         st.subheader("🧠 Neural Link")
-        if "messages" not in st.session_state: st.session_state.messages = []
+        
+        # 1. Initialize Chat from Config (The Memory)
+        if "messages" not in st.session_state:
+            st.session_state.messages = config.get('chat_history', [])
+
+        # 2. Display Chat
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
+
+        # 3. Handle New Input
         if prompt := st.chat_input("Ask Orbit..."):
+            # Append User Message
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.markdown(prompt)
+            
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    ctx = f"You are Orbit. User studies: {', '.join(config['current_units'])}. Difficulty: {config['difficulty']}. Question: {prompt}"
+                    # Context Injection
+                    ctx = f"""
+                    You are Orbit. 
+                    User studies: {', '.join(config['current_units'])}. 
+                    Difficulty: {config['difficulty']}.
+                    Chat History Context: {st.session_state.messages[-5:]}
+                    Current Question: {prompt}
+                    """
                     response_obj = ask_orbit(ctx)
+                    
                     if response_obj and response_obj.text:
                         st.markdown(response_obj.text)
+                        
+                        # Append AI Message
                         st.session_state.messages.append({"role": "assistant", "content": response_obj.text})
+                        
+                        # --- MEMORY SAVE PROTOCOL ---
+                        # 1. Update Config Object
+                        # Sliding Window: Keep only the last MAX_HISTORY messages
+                        config['chat_history'] = st.session_state.messages[-MAX_HISTORY:]
+                        
+                        # 2. Save to Cloud/Local
+                        save_config(config)
+                        st.session_state.config = config # Update session
                     else:
                         st.error("⚠️ Connection Interrupted. Check Keys.")
 
@@ -222,25 +253,14 @@ if config:
                     st.error("No units loaded!")
                 else:
                     with st.spinner("Generating Chaos..."):
-                        # 1. Random Parameters
                         target_unit = random.choice(config['current_units'])
                         num_questions = random.randint(1, 10)
                         
-                        # 2. Batch Request (Saves API Limits)
                         q_prompt = f"""
                         Generate {num_questions} multiple-choice questions about {target_unit} for a 4th Year Student.
                         Difficulty: {config['difficulty']}.
-                        
-                        Return ONLY a raw JSON list of objects. No markdown formatting.
-                        Format:
-                        [
-                            {{
-                                "q": "Question text",
-                                "o": ["Option A", "Option B", "Option C", "Option D"],
-                                "a": "Correct Option Text (e.g. Option A)",
-                                "e": "Explanation"
-                            }}
-                        ]
+                        Return ONLY a raw JSON list of objects. No markdown.
+                        Format: [{{"q": "...", "o": ["A", "B"], "a": "A", "e": "..."}}]
                         """
                         response = ask_orbit(q_prompt)
                         
@@ -250,7 +270,7 @@ if config:
                                 quiz_data = json.loads(clean_text)
                                 st.session_state['quiz_data'] = quiz_data
                                 st.session_state['quiz_unit'] = target_unit
-                                st.session_state['quiz_answers'] = {} # Reset answers
+                                st.session_state['quiz_answers'] = {} 
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to parse quiz: {e}")
@@ -260,23 +280,15 @@ if config:
         with col_q2:
             if 'quiz_data' in st.session_state:
                 st.info(f"**Unit:** {st.session_state['quiz_unit']} | **Questions:** {len(st.session_state['quiz_data'])}")
-                
                 with st.form("quiz_form"):
                     for i, q in enumerate(st.session_state['quiz_data']):
                         st.markdown(f"**{i+1}. {q['q']}**")
-                        # Use a unique key for each question's radio button
                         st.session_state['quiz_answers'][i] = st.radio(
-                            "Select answer:", 
-                            q['o'], 
-                            key=f"q_{i}", 
-                            index=None,
-                            label_visibility="collapsed"
+                            "Select answer:", q['o'], key=f"q_{i}", index=None, label_visibility="collapsed"
                         )
                         st.divider()
                     
-                    submitted = st.form_submit_button("Submit Quiz")
-                    
-                    if submitted:
+                    if st.form_submit_button("Submit Quiz"):
                         score = 0
                         total = len(st.session_state['quiz_data'])
                         for i, q in enumerate(st.session_state['quiz_data']):
@@ -287,10 +299,8 @@ if config:
                             else:
                                 st.error(f"Q{i+1}: Wrong. Correct: {q['a']}")
                                 st.caption(f"ℹ️ {q['e']}")
-                        
                         st.metric("Final Score", f"{score}/{total}")
-                        if score == total:
-                            st.balloons()
+                        if score == total: st.balloons()
             else:
                 st.write("No active quiz. Hit the Roll button.")
 
