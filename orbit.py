@@ -14,10 +14,10 @@ warnings.filterwarnings("ignore")
 
 import google.generativeai as genai
 from telegram import Bot
-from github import Github  # Requires: pip install PyGithub
+from github import Github
 
 # --- 🔐 SECRETS MANAGEMENT ---
-GEMINI_API_KEYS = [] # Initialize explicitly to prevent NameError
+GEMINI_API_KEYS = []
 
 # 1. Load Secrets from Env
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -25,8 +25,8 @@ KEYS_STRING = os.environ.get("GEMINI_KEYS")
 GITHUB_PAT = os.environ.get("GITHUB_KEYS") or os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
 
-# 2. Local Fallback (If Env is missing stuff)
-if not TELEGRAM_TOKEN or not KEYS_STRING or not GITHUB_PAT:
+# 2. Local Fallback
+if not TELEGRAM_TOKEN or not KEYS_STRING:
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         secrets_path = os.path.join(script_dir, ".streamlit", "secrets.toml")
@@ -35,114 +35,132 @@ if not TELEGRAM_TOKEN or not KEYS_STRING or not GITHUB_PAT:
             print(f"📂 Loading secrets from: {secrets_path}")
             with open(secrets_path, "r") as f:
                 local_secrets = toml.load(f)
-                
                 TELEGRAM_TOKEN = TELEGRAM_TOKEN or local_secrets.get("TELEGRAM_TOKEN")
-                
-                # Handle Gemini Keys
                 raw_keys = local_secrets.get("GEMINI_KEYS")
                 if isinstance(raw_keys, list):
                     GEMINI_API_KEYS = raw_keys
                 elif isinstance(raw_keys, str):
                     GEMINI_API_KEYS = [k.strip() for k in raw_keys.split(",")]
-                
                 GITHUB_PAT = GITHUB_PAT or local_secrets.get("GITHUB_KEYS") or local_secrets.get("GITHUB_TOKEN")
                 GITHUB_REPO = GITHUB_REPO or local_secrets.get("GITHUB_REPO")
-
     except Exception as e:
         print(f"⚠️ Local secrets error: {e}")
 
-# 3. Final Processing
-# If GEMINI_API_KEYS is still empty but KEYS_STRING exists (Env var path), parse it
+# 3. Final Parse
 if not GEMINI_API_KEYS and KEYS_STRING:
     GEMINI_API_KEYS = [k.strip() for k in KEYS_STRING.split(",")]
 
-# Final Cleanup (Safe because GEMINI_API_KEYS is initialized)
 GEMINI_API_KEYS = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
 
-# Validate Critical Secrets
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     print("❌ FATAL ERROR: Telegram Token or Gemini Keys missing.")
     sys.exit(1)
 
 CHAT_ID = "6882899041" 
 CURRENT_KEY_INDEX = 0
+SELECTED_MODEL_NAME = "gemini-1.5-flash" # Default
 
-# --- CONFIGURATION & ROTATION ---
+# --- 🧠 BRAIN CONFIGURATION ---
 def configure_genai():
+    """Sets the active API key based on the current index."""
     global CURRENT_KEY_INDEX
     if not GEMINI_API_KEYS: return
-    key = GEMINI_API_KEYS[CURRENT_KEY_INDEX]
+    
+    # Ensure index is within bounds (wrap around safety)
+    CURRENT_KEY_INDEX = CURRENT_KEY_INDEX % len(GEMINI_API_KEYS)
+    current_key = GEMINI_API_KEYS[CURRENT_KEY_INDEX]
+    
     try:
-        genai.configure(api_key=key)
-        # print(f"🔑 Active Key Index: {CURRENT_KEY_INDEX}") # Debug only
+        genai.configure(api_key=current_key)
+        # print(f"🔑 Active Key: ...{current_key[-4:]} (Index {CURRENT_KEY_INDEX})")
     except Exception as e:
-        print(f"⚠️ Config Error on Key #{CURRENT_KEY_INDEX+1}: {e}")
+        print(f"⚠️ Config Error: {e}")
 
-def rotate_key():
-    global CURRENT_KEY_INDEX
-    if len(GEMINI_API_KEYS) > 1:
-        CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(GEMINI_API_KEYS)
-        print(f"🔄 Rotating to Backup Key #{CURRENT_KEY_INDEX + 1}...")
-        configure_genai()
-        global model
-        model = get_valid_model() 
-        return True
-    return False
-
-# 📡 SONAR SCANNER
-def get_valid_model():
-    print("🔍 Sonar Scanning for valid models...")
+def resolve_model_name():
+    """Finds the best model ONCE at startup to save API calls."""
+    print("🔍 Sonar Scanning for best model...")
     try:
+        # Use first key to find model
+        configure_genai()
         models = list(genai.list_models())
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
-        # 1. Look for standard 1.5 flash
+        # Priority 1: Flash 1.5
         for m in valid_models:
             if 'gemini-1.5-flash' in m and 'latest' not in m and 'exp' not in m:
-                print(f"✅ Locked on target: {m}")
-                return genai.GenerativeModel(m.replace("models/", ""))
+                print(f"✅ Target Locked: {m}")
+                return m.replace("models/", "")
         
-        # 2. Look for ANY flash
+        # Priority 2: Any Flash
         for m in valid_models:
              if 'flash' in m and 'gemini-2' not in m and 'exp' not in m:
                 print(f"⚠️ Flash Fallback: {m}")
-                return genai.GenerativeModel(m.replace("models/", ""))
+                return m.replace("models/", "")
 
+        # Priority 3: Anything else
         if valid_models:
-            return genai.GenerativeModel(valid_models[0].replace("models/", ""))
+            return valid_models[0].replace("models/", "")
             
     except Exception as e:
-        print(f"⚠️ Scan failed: {e}")
+        print(f"⚠️ Scan failed ({e}). Defaulting to Flash.")
     
-    print("🤞 Sonar failed. Forcing 'gemini-1.5-flash'...")
-    return genai.GenerativeModel('gemini-1.5-flash')
+    return "gemini-1.5-flash"
 
+# Perform initial setup
 configure_genai()
-model = get_valid_model()
+SELECTED_MODEL_NAME = resolve_model_name()
+model = genai.GenerativeModel(SELECTED_MODEL_NAME)
 
-# 🛡️ SAFE GENERATOR
+def rotate_key():
+    """Switches to the next key without re-scanning models."""
+    global CURRENT_KEY_INDEX, model
+    
+    if len(GEMINI_API_KEYS) <= 1:
+        print("❌ No backup keys available for rotation.")
+        return False
+
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(GEMINI_API_KEYS)
+    print(f"🔄 Rotating to Key #{CURRENT_KEY_INDEX + 1}...")
+    
+    # Re-configure with new key
+    configure_genai()
+    
+    # Re-instantiate model to ensure it uses the new config
+    # We DO NOT call resolve_model_name() here to save an API call
+    model = genai.GenerativeModel(SELECTED_MODEL_NAME)
+    return True
+
+# 🛡️ SAFE GENERATOR LOOP
 def generate_content_safe(prompt_text):
     global model
-    max_retries = 3
+    # Try every key we have + 1 retry
+    max_retries = len(GEMINI_API_KEYS) + 1
+    
     for attempt in range(max_retries):
         try:
             return model.generate_content(prompt_text)
         except Exception as e:
             err_msg = str(e)
-            if "404" in err_msg:
-                print("⚠️ Model 404. Re-scanning...")
-                model = get_valid_model()
-                time.sleep(1)
-                continue
-            elif "429" in err_msg or "403" in err_msg:
-                print(f"⏳ API Issue ({err_msg}). Rotating...")
+            
+            # Detect Quota (429) or Auth (403) issues
+            is_quota = "429" in err_msg or "quota" in err_msg.lower() or "ResourceExhausted" in err_msg
+            is_auth = "403" in err_msg or "leaked" in err_msg.lower()
+            
+            if is_quota or is_auth:
+                print(f"⏳ API Issue ({'Quota' if is_quota else 'Auth'}). Switching keys...")
                 if rotate_key():
-                    time.sleep(2)
+                    time.sleep(1) # Short breather for the new key
                     continue
                 else:
-                    time.sleep(10)
+                    print("❌ All keys exhausted.")
+                    return None
             else:
-                print(f"❌ API Error: {err_msg}")
+                # If it's a 500/503 (Server Error), maybe wait and retry same key
+                if "500" in err_msg or "503" in err_msg:
+                    time.sleep(2)
+                    continue
+                
+                print(f"❌ Critical Error: {err_msg}")
                 return None
     return None
 
@@ -154,22 +172,19 @@ async def send_safe_message(bot, chat_id, text):
         print(f"⚠️ HTML Parse Error: {e}. Sending raw text.")
         await bot.send_message(chat_id=chat_id, text=text)
 
-# --- ☁️ CONFIG LOADER (CLOUD SYNCED) ---
+# --- ☁️ CONFIG LOADER ---
 def load_config():
-    # 1. Try fetching from GitHub (The Cloud Truth)
     if GITHUB_PAT and GITHUB_REPO:
         try:
-            print("☁️ Fetching config from GitHub...")
+            # print("☁️ Fetching config from GitHub...")
             g = Github(GITHUB_PAT)
             repo = g.get_repo(GITHUB_REPO)
             contents = repo.get_contents("config.json")
             decoded = contents.decoded_content.decode()
             return json.loads(decoded)
         except Exception as e:
-            print(f"⚠️ Cloud load failed: {e}. Falling back to local.")
+            print(f"⚠️ Cloud load failed: {e}")
 
-    # 2. Fallback to Local File
-    print("📂 Loading local config...")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, 'config.json')
     try:
@@ -181,7 +196,7 @@ async def send_chaos():
     config = load_config()
     
     if not config:
-        print("❌ Config could not be loaded. Aborting mission.")
+        print("❌ Config load failed.")
         return 
 
     if "--quiz" in sys.argv: roll = 90
@@ -201,45 +216,21 @@ async def send_chaos():
         if response and response.text:
             msg = f"🎱 <b>Magic-∞ Fact:</b>\n\n{response.text}"
             await send_safe_message(bot, CHAT_ID, msg)
-        else:
-            print("⚠️ No response for Fact")
 
     # --- MULTI-QUIZ MODE ---
     elif 86 <= roll <= 98:
-        quotes = [
-            "Your stop loss is tighter than your work ethic right now. 🛑💀",
-            "Green candles wait for no one. Neither does your rent. 🕯️💸",
-            "Market's volatile. Your focus? Non-existent. 📉🥴",
-            "Stop staring at the 1-minute chart and start grinding. ⏳😤",
-            "Do it for the plot. (And the paycheck). 🎬💰",
-            "Standing on business? More like sleeping on business. 🛌📉",
-            "Delulu is not the solulu if you don't do the work. 🦄🚫",
-            "Academic comeback season starts in 3... 2... never mind, just start. 🎓🏁",
-            "Not the academic downfall arc... fix it immediately. 📉🚧",
-            "Brain rot is real, and you are patient zero. 🧟📉",
-            "Locked in? Or locked out of reality? Focus. 🔒🌍"
-        ]
-        
         unit = random.choice(config['current_units'])
-        quote = random.choice(quotes)
-        
-        # 🎲 Determine number of questions (1 to 5 to avoid spam bans, adjust to 10 if you want)
         num_q = random.randint(1, 5) 
         
-        await send_safe_message(bot, CHAT_ID, f"🚨 <b>{quote}</b>\n\nIncoming Rapid Fire: <b>{num_q} Questions on {unit}</b>")
+        await send_safe_message(bot, CHAT_ID, f"🚨 <b>INCOMING CHAOS</b>\n\nRapid Fire: <b>{num_q} Questions on {unit}</b>")
         
-        # BATCH REQUEST: Ask for ALL questions in ONE prompt
         prompt = f"""
         Generate {num_q} multiple-choice questions about {unit} for a 4th Year Student.
-        
-        Strict JSON format: Return a LIST of objects.
+        Strict JSON format: List of objects.
         [
-            {{"question": "...", "options": ["A","B","C","D"], "correct_id": 0, "explanation": "..."}},
-            ...
+            {{"question": "...", "options": ["A","B","C","D"], "correct_id": 0, "explanation": "..."}}
         ]
-        
-        Limits: Question < 250 chars, Options < 100 chars.
-        """.replace("{num_questions}", str(num_q)) # Safe replace
+        """
 
         response = generate_content_safe(prompt)
         
@@ -247,12 +238,8 @@ async def send_chaos():
             try:
                 text = response.text.replace('```json', '').replace('```', '').strip()
                 data = json.loads(text)
+                if isinstance(data, dict): data = [data]
                 
-                # Ensure it's a list
-                if isinstance(data, dict):
-                    data = [data] # Wrap single result in list
-                
-                # LOOP AND FIRE 🔥
                 for i, q in enumerate(data):
                     try:
                         await bot.send_poll(
@@ -263,11 +250,9 @@ async def send_chaos():
                             correct_option_id=q['correct_id'],
                             explanation=q['explanation'][:190]
                         )
-                        # Sleep to prevent Telegram flooding (429 Too Many Requests)
                         time.sleep(2) 
                     except Exception as e:
-                        print(f"⚠️ Poll {i+1} failed: {e}")
-                        
+                        print(f"⚠️ Poll failed: {e}")
             except Exception as e:
                 print(f"Quiz Parse Error: {e}")
         else:
