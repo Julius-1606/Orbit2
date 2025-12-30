@@ -300,9 +300,11 @@ def set_ui_theme(current_config):
         bg_url = st.session_state.theme_cache["bg_url"]
         accent_color = st.session_state.theme_cache["accent"]
         
+        # --- 🔧 UI FIX: LIGHTER OVERLAY ---
+        # Changed opacity from 0.75/0.85 to 0.5/0.7 for better visibility on mobile
         bg_css = f"""
             background-color: #0e1117;
-            background-image: linear-gradient(rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0.85)), url("{bg_url}");
+            background-image: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.7)), url("{bg_url}");
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
