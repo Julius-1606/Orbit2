@@ -254,5 +254,6 @@
                 }
             ]
         }
-    ]
+    ],
+    "low_data_mode": true
 }
